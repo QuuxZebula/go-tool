@@ -47,18 +47,18 @@
 #   On Linux (or other UN*X systems) this is typically:
 #     ~/.go/shortcuts.xml
 
-__version_info__ = (1, 2, 1)
+__version_info__ = (1, 3, 0)
 __version__ = '.'.join(map(str, __version_info__))
 
-import os
-from os.path import splitext, expanduser, join, exists
-import sys
+import xml.dom.minidom
+import tempfile
 import getopt
 import re
-import pprint
-import codecs
 import xml.dom.minidom
-
+import os
+import sys
+from os.path import normcase, normpath, join, exists, expanduser
+import codecs
 
 
 #---- exceptions
@@ -66,9 +66,10 @@ import xml.dom.minidom
 class GoError(Exception):
     pass
 
+
 class InternalGoError(GoError):
     def __str__(self):
-        return GoError.__str__(self) + """
+        return super().__str__() + """
 
 * * * * * * * * * * * * * * * * * * * * * * * * * * * *
 * Please log a bug at                                 *
@@ -78,20 +79,18 @@ class InternalGoError(GoError):
 * * * * * * * * * * * * * * * * * * * * * * * * * * * *"""
 
 
-
 #---- globals
 
 _envvar = "GO_SHELL_SCRIPT"
 
 # On Windows, "console" or "windows" controls how some things behave.
 _subsystem = "console"
-if sys.platform.startswith("win") and\
-   os.path.splitext(sys.executable)[0][-1] == 'w':
+if sys.platform.startswith("win") and \
+        os.path.splitext(sys.executable)[0][-1] == 'w':
     _subsystem = "windows"
 
-
 _gDriverFromShell = {
-    "cmd": r"""\
+    "cmd": r"""
 @echo off
 rem Windows shell driver for 'go' (http://code.google.com/p/go-tool/).
 set GO_SHELL_SCRIPT=%TEMP%\__tmp_go.bat
@@ -102,14 +101,13 @@ set GO_SHELL_SCRIPT=""",
 # Bash shell driver for 'go' (http://code.google.com/p/go-tool/).
 function go {
     export GO_SHELL_SCRIPT=$HOME/.__tmp_go.sh
-    python -m go $*
+    python -m go "$@"
     if [ -f $GO_SHELL_SCRIPT ] ; then
         source $GO_SHELL_SCRIPT
     fi
     unset GO_SHELL_SCRIPT
 }""",
 }
-
 
 
 #---- public module interface
@@ -139,10 +137,6 @@ def getShortcutsFile():
 
 def getDefaultShortcuts():
     """Return the dictionary of default shortcuts."""
-    if sys.platform == "win32" and sys.version.startswith("2.3."):
-        import warnings
-        warnings.filterwarnings("ignore", module="fcntl", lineno=7)
-    import tempfile
     shortcuts = {
         '.': os.curdir,
         '..': os.pardir,
@@ -170,7 +164,7 @@ def setShortcut(name, value):
         dom = xml.dom.minidom.parse(shortcutsXml)
     else:
         dom = xml.dom.minidom.parseString(
-                    '<shortcuts version="1.0"></shortcuts>')
+            '<shortcuts version="1.0"></shortcuts>')
 
     shortcuts = dom.getElementsByTagName("shortcuts")[0]
     for s in shortcuts.getElementsByTagName("shortcut"):
@@ -191,9 +185,8 @@ def setShortcut(name, value):
 
     if not os.path.isdir(os.path.dirname(shortcutsXml)):
         os.makedirs(os.path.dirname(shortcutsXml))
-    fout = open(shortcutsXml, 'w')
-    fout.write(dom.toxml())
-    fout.close()
+    with open(shortcutsXml, 'w', encoding='utf-8') as fout:
+        fout.write(dom.toprettyxml(indent="  "))
 
 
 def getShortcuts():
@@ -226,7 +219,7 @@ def resolvePath(path):
         if tagend == -1:
             tag, suffix = path, None
         else:
-            tag, suffix = path[:tagend], path[tagend+1:]
+            tag, suffix = path[:tagend], path[tagend + 1:]
         try:
             target = shortcuts[tag]
         except KeyError:
@@ -236,7 +229,7 @@ def resolvePath(path):
             # the user typed it and act accordingly.
             home = os.path.expanduser('~')
             if path.startswith(home):
-                tag, suffix = '~', path[len(home)+1:]
+                tag, suffix = '~', path[len(home):]
                 target = shortcuts[tag]
             elif os.path.isdir(path):
                 target = ""
@@ -266,28 +259,26 @@ def generateShellScript(scriptName, path=None):
         target = resolvePath(path)
 
     if sys.platform.startswith("win"):
-        fbat = open(scriptName, 'w')
-        fbat.write('@echo off\n')
-        if target:
-            drive, tail = os.path.splitdrive(target)
+        with open(scriptName, 'w', encoding='utf-8') as fbat:
             fbat.write('@echo off\n')
-            if drive:
-                fbat.write('call %s\n' % drive)
-            fbat.write('call cd "%s"\n' % target)
-            fbat.write('title "%s"\n' % target)
-        fbat.close()
+            if target:
+                drive, tail = os.path.splitdrive(target)
+                fbat.write('@echo off\n')
+                if drive:
+                    fbat.write('call %s\n' % drive)
+                fbat.write('call cd "%s"\n' % target)
+                fbat.write('title "%s"\n' % target)
     else:
-        fsh = open(scriptName, 'w')
-        fsh.write('#!/bin/sh\n')
-        if target:
-            fsh.write('cd "%s"\n' % target)
-        fsh.close()
+        with open(scriptName, 'w', encoding='utf-8') as fsh:
+            fsh.write('#!/bin/sh\n')
+            if target:
+                fsh.write('cd "%s"\n' % target)
 
 
 def printShortcuts(shortcuts, subheader=None):
     # Organize the shortcuts into groups.
     defaults = [re.escape(s) for s in getDefaultShortcuts().keys()]
-    groupMap = { # mapping of group regex to group order and title
+    groupMap = {  # mapping of group regex to group order and title
         "^(%s)$" % '|'.join(defaults): (0, "Default shortcuts"),
         None: (1, "Custom shortcuts"),
     }
@@ -318,15 +309,15 @@ def printShortcuts(shortcuts, subheader=None):
     header = "Go Shortcuts"
     if subheader:
         header += ": " + subheader
-    table += ' '*20 + header + '\n'
-    table += ' '*20 + '='*len(header) + '\n'
+    table += ' ' * 20 + header + '\n'
+    table += ' ' * 20 + '=' * len(header) + '\n'
     for order, title in titles:
         if title not in grouped: continue
         table += '\n' + title + ":\n"
         for shortcut in grouped[title]:
             dir = shortcuts[shortcut]
-            #TODO: Might want to prettily shorten long names.
-            #if len(dir) > 53:
+            # TODO: Might want to prettily shorten long names.
+            # if len(dir) > 53:
             #    dir = dir[:50] + "..."
             table += "  %-20s  %s\n" % (shortcut, dir)
 
@@ -354,9 +345,11 @@ def error(msg):
                          "platform, '%s'." % (_subsystem, sys.platform))
 
 
+# ---- private module interface
+
 def _getShell():
     if sys.platform == "win32":
-        #assert "cmd.exe" in os.environ["ComSpec"]
+        # assert "cmd.exe" in os.environ["ComSpec"]
         return "cmd"
     elif "SHELL" in os.environ:
         shell_path = os.environ["SHELL"]
@@ -368,9 +361,8 @@ def _getShell():
         raise InternalGoError("couldn't determine your shell (SHELL=%r)"
                               % os.environ.get("SHELL"))
 
-def setup():
-    from os.path import normcase, normpath, join
 
+def setup():
     shell = _getShell()
     try:
         driver = _gDriverFromShell[shell]
@@ -388,7 +380,6 @@ def setup():
 
     print("* * *")
 
-
     if shell == "cmd":
         # Need a install candidate dir for "go.bat".
         nprefix = _normpath(sys.prefix)
@@ -401,11 +392,11 @@ def setup():
                     ncandidates.add(ndir)
                     candidates.append(dir)
             elif nhome and ndir.startswith(nhome) \
-                 and ndir[len(nhome)+1:].count(os.path.sep) < 2:
+                    and ndir[len(nhome) + 1:].count(os.path.sep) < 2:
                 if ndir not in ncandidates:
                     ncandidates.add(ndir)
                     candidates.append(dir)
-        #print candidates
+        # print candidates
 
         print("""\
 It appears that `go' is not setup properly in your environment. Typing
@@ -420,24 +411,25 @@ your PATH:
         if candidates:
             print("\nCandidate directories are:\n")
             for i, dir in enumerate(candidates):
-                print("  [%s] %s" % (i+1, dir))
+                print("  [%s] %s" % (i + 1, dir))
 
             print()
             answer = _query_custom_answers(
                 "If you would like this script to create `go.bat' for you in\n"
-                    "one of these directories, enter the number of that\n"
-                    "directory. Otherwise, enter 'no' to not create `go.bat'.",
-                [str(i+1) for i in range(len(candidates))] + ["&no"],
+                "one of these directories, enter the number of that\n"
+                "directory. Otherwise, enter 'no' to not create `go.bat'.",
+                [str(i + 1) for i in range(len(candidates))] + ["&no"],
                 default="no",
             )
             if answer == "no":
                 pass
             else:
-                dir = candidates[int(answer)-1]
+                dir = candidates[int(answer) - 1]
                 path = join(dir, "go.bat")
                 print("\nCreating `%s'." % path)
                 print("You should now be able to run `go --help'.")
-                open(path, 'w').write(driver)
+                with open(path, 'w', encoding="utf-8") as f:
+                    f.write(driver)
     elif shell == "sh":
         print("""\
 It appears that `go' is not setup properly in your environment. Typing
@@ -461,20 +453,17 @@ Would you like this script to append `function go' to one of the following
 Bash initialization scripts? If so, enter the number of the listed file.
 Otherwise, enter `no'."""
             for i, path in enumerate(candidates):
-                q += "\n (%d) %s" % (i+1, path)
-            answers = [str(i+1) for i in range(len(candidates))] + ["&no"]
+                q += "\n (%d) %s" % (i + 1, path)
+            answers = [str(i + 1) for i in range(len(candidates))] + ["&no"]
             print()
             answer = _query_custom_answers(q, answers, default="no")
             if answer == "no":
                 pass
             else:
-                path = candidates[int(answer)-1]
+                path = candidates[int(answer) - 1]
                 xpath = expanduser(path)
-                f = codecs.open(xpath, 'a', 'utf-8')
-                try:
-                    f.write('\n\n'+driver)
-                finally:
-                    f.close()
+                with codecs.open(xpath, 'a', 'utf-8') as f:
+                    f.write('\n\n' + driver)
                 print()
                 print("`function go' appended to `%s'." % path)
                 print("Run `source %s` to enable this for this shell." % path)
@@ -518,10 +507,10 @@ def _query_custom_answers(question, answers, default=None):
     }
     clean_answers = []
     for answer in answers:
-        if '&' in answer and not answer.index('&') == len(answer)-1:
+        if '&' in answer and not answer.index('&') == len(answer) - 1:
             head, tail = answer.split('&', 1)
-            prompt_bits.append(head.lower()+tail.lower().capitalize())
-            clean_answer = head+tail
+            prompt_bits.append(head.lower() + tail.lower().capitalize())
+            clean_answer = head + tail
             shortcut = tail[0].lower()
         else:
             prompt_bits.append(answer.lower())
@@ -553,14 +542,13 @@ def _query_custom_answers(question, answers, default=None):
 
     while 1:
         sys.stdout.write(leader)
-        choice = raw_input().lower()
+        choice = input().lower()
         if default is not None and choice == '':
             return default
         elif choice in answer_from_valid_choice:
             return answer_from_valid_choice[choice]
         else:
-            sys.stdout.write("\n"+admonishment+"\n\n\n")
-
+            sys.stdout.write("\n" + admonishment + "\n\n\n")
 
 
 # Recipe: indent (0.2.1)
@@ -571,7 +559,7 @@ def _indent(s, width=4, skip_first_line=False):
     indicating if the first line should NOT be indented.
     """
     lines = s.splitlines(1)
-    indentstr = ' '*width
+    indentstr = ' ' * width
     if skip_first_line:
         return indentstr.join(lines)
     else:
@@ -579,7 +567,6 @@ def _indent(s, width=4, skip_first_line=False):
 
 
 def _normpath(path):
-    from os.path import normcase, normpath
     n = normcase(normpath(path))
     if n.endswith(os.path.sep):
         n = n[:-1]
@@ -597,10 +584,10 @@ def main(argv):
         shellScript = os.environ[_envvar]
     except KeyError:
         if _subsystem == "windows":
-            pass # Don't complain about missing console setup.
+            pass  # Don't complain about missing console setup.
         return setup()
     else:
-        generateShellScript(shellScript) # no-op, overwrite old one
+        generateShellScript(shellScript)  # no-op, overwrite old one
 
     # Parse options
     try:
@@ -676,7 +663,7 @@ def main(argv):
     elif action == "cd":
         if len(args) != 1:
             error("Incorrect number of arguments. argv: %s" % argv)
-            #error("Usage: go [options...] shortcut[/subpath]")
+            # error("Usage: go [options...] shortcut[/subpath]")
             return 1
         path = args[0]
         if _subsystem == "console":
@@ -701,7 +688,7 @@ def main(argv):
                       "variable.")
                 return 1
 
-            argv = [comspec, "/k",      # Does command.com support '/k'?
+            argv = [comspec, "/k",  # Does command.com support '/k'?
                     "cd", "/D", '"%s"' % dir]
             if os.path.basename(comspec).lower() == "cmd.exe":
                 argv += ["&&", "title", '%s' % dir]
@@ -757,12 +744,11 @@ if __name__ == "__main__":
     if _subsystem == "windows":
         try:
             retval = main(sys.argv)
-        except:
+        except Exception:
             import traceback
+
             tb = ''.join(traceback.format_exception(*sys.exc_info()))
             error(tb)
     else:
         retval = main(sys.argv)
     sys.exit(retval)
-
-
